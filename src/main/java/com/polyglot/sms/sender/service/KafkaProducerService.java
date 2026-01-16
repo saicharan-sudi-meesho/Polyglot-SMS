@@ -3,8 +3,11 @@ package com.polyglot.sms.sender.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.stereotype.Service;
 import org.springframework.kafka.support.SendResult;
+import org.springframework.stereotype.Service;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import com.polyglot.sms.sender.entity.FailedKafkaEvent;
+
 import java.util.concurrent.CompletableFuture;
 
 @Service
@@ -13,18 +16,41 @@ import java.util.concurrent.CompletableFuture;
 public class KafkaProducerService {
 
     private final KafkaTemplate<String, Object> kafkaTemplate;
-
+    private final MongoTemplate mongoTemplate;
 
     public void sendMessage(String topic, String key, Object event) {
-        CompletableFuture<SendResult<String, Object>> future = kafkaTemplate.send(topic, key, event);
-    
-        future.whenComplete((result, ex) -> {
-            if (ex == null) {
-                log.info("Successfully sent message to topic {} at offset {}",topic, result.getRecordMetadata().offset());
-            } else {
-                log.error("Unable to send message to Kafka", ex);
-                // Optional: Save to a 'FailedEvents' table in DB
-            }
-        });
+        try {
+            // 1. Try to send. If Metadata fetch fails (Kafka down), this throws Exception immediately.
+            CompletableFuture<SendResult<String, Object>> future = kafkaTemplate.send(topic, key, event);
+
+            // 2. Handle Asynchronous failures (Network dropout during send)
+            future.whenComplete((result, ex) -> {
+                if (ex != null) {
+                    log.error("Async Kafka Failure. Saving to Mongo. Key: {}", key, ex);
+                    saveToFallback(topic, key, event);
+                } else {
+                    log.info("Success: Offset {}", result.getRecordMetadata().offset());
+                }
+            });
+
+        } catch (Exception e) {
+            // 3. Handle Synchronous failures (Kafka totally down / Metadata timeout)
+            log.error("Sync Kafka Failure (Metadata/Timeout). Saving to Mongo. Key: {}", key, e);
+            saveToFallback(topic, key, event);
+        }
+    }
+
+    private void saveToFallback(String topic, String key, Object event) {
+        try {
+            FailedKafkaEvent fallback = FailedKafkaEvent.builder()
+                    .topic(topic)
+                    .key(key)
+                    .event(event)
+                    .createdAt(System.currentTimeMillis())
+                    .build();
+            mongoTemplate.save(fallback);
+        } catch (Exception ex) {
+            log.error("CRITICAL: Both Kafka and Mongo are DOWN. Data lost for user: {}", key);
+        }
     }
 }
