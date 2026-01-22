@@ -20,10 +20,10 @@ public class KafkaProducerService {
 
     public void sendMessage(String topic, String key, Object event) {
         try {
-            // 1. Try to send. If Metadata fetch fails (Kafka down), this throws Exception immediately.
+            // If Metadata fetch fails (Kafka down), this throws Exception immediately.since max blocking time for producer is set to 2s for fetching metadata
             CompletableFuture<SendResult<String, Object>> future = kafkaTemplate.send(topic, key, event);
 
-            // 2. Handle Asynchronous failures (Network dropout during send)
+            // Asynchronous failures when kafka crashes after data being sent to broker
             future.whenComplete((result, ex) -> {
                 if (ex != null) {
                     log.error("Async Kafka Failure. Saving to Mongo. Key: {}", key, ex);
@@ -34,7 +34,7 @@ public class KafkaProducerService {
             });
 
         } catch (Exception e) {
-            // 3. Handle Synchronous failures (Kafka totally down / Metadata timeout)
+            // Synchronous failures (Kafka totally down / Metadata timeout)
             log.error("Sync Kafka Failure (Metadata/Timeout). Saving to Mongo. Key: {}", key, e);
             saveToFallback(topic, key, event);
         }
